@@ -12,7 +12,13 @@ from app.core.database import get_db
 from app.models.request_models import ChatRequest
 from app.models.database_models import RequestLog
 
-from app.services.gemini_service import ask_gemini
+from app.services.provider_manager import (
+    provider_manager
+)
+
+from app.services.model_selector import (
+    model_selector
+)
 
 from app.services.cost_calculator import (
     CostCalculator
@@ -31,7 +37,8 @@ from app.analyzers.pii_scanner import (
 )
 
 from app.analyzers.semantic_detector import (
-    check_similarity
+    check_similarity,
+    get_similarity_stats
 )
 
 from app.analyzers.prompt_quality_analyzer import (
@@ -53,7 +60,7 @@ from app.analyzers.optimization_recommendation_engine import (
 router = APIRouter()
 
 # =========================================================
-# ANALYZER INITIALIZATION
+# INITIALIZE ANALYZERS
 # =========================================================
 
 prompt_analyzer = PromptQualityAnalyzer()
@@ -86,6 +93,15 @@ def realtime_metrics():
     return metrics_store.get_metrics()
 
 # =========================================================
+# SEMANTIC SIMILARITY STATS
+# =========================================================
+
+@router.get("/similarity-stats")
+def similarity_stats():
+
+    return get_similarity_stats()
+
+# =========================================================
 # MAIN CHAT ENDPOINT
 # =========================================================
 
@@ -100,13 +116,13 @@ def chat(
     try:
 
         # =================================================
-        # REQUEST TRACKING
+        # TRACK REQUEST
         # =================================================
 
         metrics_store.increment_requests()
 
         # =================================================
-        # PROMPT ANALYSIS
+        # ANALYZE PROMPT
         # =================================================
 
         pii_findings = scan_pii(
@@ -145,11 +161,39 @@ def chat(
             metrics_store.add_high_risk()
 
         # =================================================
-        # LLM CALL
+        # MODEL SELECTION
         # =================================================
 
-        llm_response = ask_gemini(
-            request.prompt
+        model_decision = (
+            model_selector.select_model(
+                intent=intent,
+                risk_level=(
+                    risk_analysis.risk_level
+                ),
+                prompt_quality_score=(
+                    prompt_quality.score
+                )
+            )
+        )
+
+        provider_name = (
+            model_decision["provider"]
+        )
+
+        model_name = (
+            model_decision["model"]
+        )
+
+        # =================================================
+        # PROVIDER EXECUTION
+        # =================================================
+
+        llm_response = (
+            provider_manager.generate(
+                provider_name=provider_name,
+                model_name=model_name,
+                prompt=request.prompt
+            )
         )
 
         # =================================================
@@ -167,9 +211,9 @@ def chat(
 
         real_cost = (
             CostCalculator.calculate(
-                model_name=llm_response[
-                    "model"
-                ],
+                model_name=(
+                    llm_response["model"]
+                ),
                 input_tokens=(
                     llm_response[
                         "input_tokens"
@@ -184,7 +228,7 @@ def chat(
         )
 
         # =================================================
-        # REALTIME METRICS
+        # UPDATE REALTIME METRICS
         # =================================================
 
         metrics_store.add_tokens(
@@ -242,11 +286,25 @@ def chat(
 
             source=request.source,
 
+            provider=(
+                llm_response[
+                    "provider"
+                ]
+            ),
+
+            model_name=(
+                llm_response[
+                    "model"
+                ]
+            ),
+
             prompt=request.prompt,
 
-            response=llm_response[
-                "response"
-            ],
+            response=(
+                llm_response[
+                    "response"
+                ]
+            ),
 
             intent=intent,
 
@@ -296,20 +354,44 @@ def chat(
         db.refresh(log)
 
         # =================================================
-        # RESPONSE
+        # RESPONSE PAYLOAD
         # =================================================
 
         return {
 
             "request_id": log.id,
 
-            "model": llm_response[
-                "model"
-            ],
+            "provider": (
+                llm_response[
+                    "provider"
+                ]
+            ),
 
-            "response": llm_response[
-                "response"
-            ],
+            "model": (
+                llm_response[
+                    "model"
+                ]
+            ),
+
+            "response": (
+                llm_response[
+                    "response"
+                ]
+            ),
+
+            "fallback_used": (
+                llm_response.get(
+                    "fallback_used",
+                    False
+                )
+            ),
+
+            "tried_models": (
+                llm_response.get(
+                    "tried_models",
+                    []
+                )
+            ),
 
             "intent": intent,
 
@@ -378,7 +460,11 @@ def chat(
 
             "cost_analysis": {
 
-                "provider": "google",
+                "provider": (
+                    llm_response[
+                        "provider"
+                    ]
+                ),
 
                 "model": (
                     llm_response[

@@ -20,6 +20,10 @@ class RequestLog(Base):
 
     intent = Column(String)
 
+    provider = Column(String)
+
+    model_name = Column(String)
+
     risk_level = Column(String)
 
     pii_detected = Column(String)
